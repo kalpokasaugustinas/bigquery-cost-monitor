@@ -2,6 +2,8 @@
 
 One HTML page that shows who and what drives your BigQuery bill, and where to cut.
 
+**[Open the live page](https://kalpokasaugustinas.github.io/bigquery-cost-monitor/)** and click **sample data** to see a report for a made-up company.
+
 ## What you get
 
 | Section | Answers |
@@ -13,12 +15,12 @@ One HTML page that shows who and what drives your BigQuery bill, and where to cu
 
 ## How to use
 
-1. Download `bigquery-cost-report.html` and open it in your browser.
+1. Open the [live page](https://kalpokasaugustinas.github.io/bigquery-cost-monitor/), or download `bigquery-cost-report.html` and open it in your browser.
 2. Optionally enter your region and projects on the page (empty means automatic). Click **Copy script**, paste it into the BigQuery console and click **Run**.
    - The console shows several steps. Use the result of the last step.
 3. Click **Save results → CSV (local file)** and drop the file onto the page.
 
-The report runs fully offline. Your data is never uploaded anywhere.
+The report runs fully in your browser, and the downloaded file also works offline. Your data is never uploaded anywhere: the live page is a static file, with no server, no tracking and no cookies.
 
 ## Region
 
