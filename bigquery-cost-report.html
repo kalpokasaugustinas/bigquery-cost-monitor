@@ -1,0 +1,1516 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BigQuery Cost Report</title>
+<!--
+  bigquery cost report viewer
+  - open this file in any browser, copy the sql script from the page, run it in bigquery,
+    then drop the result (csv or json) onto the page
+  - the sql script lives in this file (script tag id="cost-report-sql"), there is no separate .sql file
+  - everything runs locally: no server, no external scripts, no data leaves your computer
+  - file names do not matter, the file is recognised by its content
+-->
+<style>
+  /* colour tokens, light theme by default */
+  :root {
+    --bg: #f7f7f5;
+    --card: #ffffff;
+    --text: #1d1d1b;
+    --muted: #6b6b66;
+    --line: #e4e4df;
+    --accent: #2f6fdb;
+    --accent-soft: #dfe9fb;
+    --good: #23824f;
+    --warn: #b7791f;
+    --warn-soft: #fbf0dc;
+    --code-bg: #f1f1ed;
+  }
+  /* dark theme follows the system setting */
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615;
+      --card: #1f1f1d;
+      --text: #ecece8;
+      --muted: #a2a29b;
+      --line: #33332f;
+      --accent: #6b9bf0;
+      --accent-soft: #24334d;
+      --good: #5cc28b;
+      --warn: #e0a84a;
+      --warn-soft: #3a2f1c;
+      --code-bg: #262624;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  /* the page grows with the screen, with side padding that scales from phone to wide monitor */
+  main { max-width: 1680px; margin: 0 auto; padding: 32px clamp(16px, 3vw, 48px) 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .card h2, .card .hint, #drop, .sub { overflow-wrap: anywhere; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .hint { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+
+  /* section header with the collapse button in the top right corner */
+  .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .toggle {
+    flex: none;
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .toggle:hover { color: var(--text); border-color: var(--muted); }
+  /* the arrow points down when open, right when collapsed */
+  .toggle::before { content: "\25BE"; }
+  .collapsed .toggle::before { content: "\25B8"; }
+  .collapsed .card-body, .collapsed .hint { display: none; }
+  .collapsed h2 { margin: 0; }
+
+  /* how it works: numbered steps and expandable questions */
+  .steps { margin: 0 0 12px; padding-left: 22px; }
+  .steps li { margin-bottom: 8px; padding-left: 4px; }
+  .faq { border-top: 1px solid var(--line); padding: 8px 0; }
+  .faq summary { font-size: 14px; }
+  .faq p { margin: 8px 0 4px; color: var(--muted); font-size: 14px; }
+  .steps .faq { border-top: none; padding: 4px 0 0; }
+  .steps pre { max-height: 320px; overflow: auto; }
+  .copy-row { display: flex; align-items: center; gap: 10px; }
+
+  /* optional region and projects fields above the copy button */
+  .settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 16px; margin: 10px 0 4px; max-width: 760px; }
+  .settings label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; }
+  .settings .optional { font-weight: 400; color: var(--muted); }
+  .settings input {
+    font: inherit;
+    font-weight: 400;
+    padding: 7px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--text);
+  }
+  .settings input:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+  .field-help { font-size: 12px; font-weight: 400; color: var(--muted); line-height: 1.4; }
+  #settings-status { grid-column: 1 / -1; margin: 0; }
+  #settings-status.error { color: var(--warn); }
+  .copy-row .btn { margin-left: 0; }
+
+  /* drop zone */
+  #drop {
+    border: 2px dashed var(--line);
+    border-radius: 10px;
+    padding: 28px 16px;
+    text-align: center;
+    background: var(--card);
+    margin-bottom: 16px;
+    transition: border-color .15s, background .15s;
+  }
+  #drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  #drop p { margin: 4px 0; }
+  .btn {
+    font: inherit;
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 14px;
+    cursor: pointer;
+    margin: 8px 4px 0;
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .privacy { font-size: 13px; color: var(--muted); }
+
+
+  /* kpi tiles */
+  #kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .kpi { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .kpi .label { font-size: 13px; color: var(--muted); }
+  .kpi .value { font-size: 24px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .kpi .note { font-size: 12px; color: var(--muted); }
+
+  /* savings hints */
+  .hints { margin: 0; padding: 0; list-style: none; }
+  .hints li {
+    overflow-wrap: anywhere;
+    background: var(--warn-soft);
+    border-left: 3px solid var(--warn);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+  }
+
+  /* horizontal bar list */
+  .bars { margin-bottom: 16px; }
+  .bar-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) 80px; gap: 10px; align-items: center; margin-bottom: 6px; font-size: 13px; }
+  .bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar-track { background: var(--code-bg); border-radius: 4px; height: 14px; }
+  .bar-fill { background: var(--accent); border-radius: 4px; height: 100%; min-width: 2px; }
+  .bar-value { text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* data tables */
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  code, pre { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  pre { background: var(--code-bg); padding: 8px; border-radius: 6px; white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; }
+  details summary { cursor: pointer; color: var(--accent); }
+  .empty { color: var(--muted); font-size: 13px; }
+  a { color: var(--accent); }
+
+  /* terms with an explanation: dotted underline, tooltip on hover, focus or tap */
+  .term { border-bottom: 1px dotted var(--muted); cursor: help; }
+  .term:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+  #tooltip {
+    position: fixed;
+    z-index: 10;
+    max-width: min(360px, calc(100vw - 16px));
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--text);
+    color: var(--bg);
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.45;
+    text-align: left;
+    white-space: normal;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, .18);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .1s;
+  }
+  #tooltip.visible { opacity: 1; }
+  #tooltip ul { margin: 6px 0; padding-left: 18px; }
+  #tooltip code { background: transparent; color: inherit; }
+  .charts { display: grid; grid-template-columns: 1fr; gap: 8px; }
+  .charts h3 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+  .sub-head { font-size: 14px; margin: 16px 0 8px; color: var(--muted); font-weight: 600; }
+  .tips { margin: 0; padding-left: 20px; }
+  .tips li { margin-bottom: 6px; }
+  .total-row td { font-weight: 600; background: var(--code-bg); }
+  .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); margin-left: 6px; }
+  /* a tag on its own line under a table name */
+  .tag.below { display: table; margin: 4px 0 0; }
+  /* pricing model notice under the page title */
+  .notice { margin: -12px 0 24px; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 4px; font-size: 14px; overflow-wrap: anywhere; }
+  .hidden { display: none; }
+
+  @media (max-width: 600px) {
+    .bar-row { grid-template-columns: minmax(0, 1fr) 70px; }
+    .bar-track { grid-column: 1 / -1; grid-row: 2; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>BigQuery cost report</h1>
+  <p class="sub">Who and what drives your BigQuery bill, and where to cut.</p>
+  <!-- the dollar figures only hold for on-demand pricing, say so before anything else -->
+  <p class="notice">
+    <strong>Costs are for on-demand pricing</strong>, where BigQuery bills the data each query reads ($6.25 per TiB).
+    On capacity pricing (BigQuery editions) you pay for slot time instead: a fixed amount for committed slots, plus
+    whatever autoscaling uses. There the dollar figures are not your bill. Use slot hours to compare.
+  </p>
+
+  <!-- how it works: step-by-step guide, collapsible like the report sections -->
+  <section class="card" data-key="howto">
+    <div class="card-head">
+      <h2>How it works</h2>
+      <button class="toggle" aria-expanded="true" title="Collapse" aria-label="Collapse How it works"></button>
+    </div>
+    <p class="hint">About 2 minutes. You need access to the BigQuery project you want to check.</p>
+    <div class="card-body">
+      <ol class="steps">
+        <li>
+          <strong>Open the BigQuery console</strong> at
+          <a href="https://console.cloud.google.com/bigquery" target="_blank" rel="noopener">console.cloud.google.com/bigquery</a>
+          and select your project in the top bar.
+        </li>
+        <li>
+          <strong>Copy the script</strong> and paste it into a new query tab. Region and projects are optional;
+          leave them empty and the script detects them.
+          <!-- optional settings written into the copied script; empty means detect automatically -->
+          <div class="settings">
+            <label>
+              <span>Region <span class="optional">optional</span></span>
+              <input id="set-region" type="text" list="region-list" placeholder="Automatic (project default)" autocomplete="off" spellcheck="false" aria-describedby="region-help">
+              <span id="region-help" class="field-help">
+                Where your queries run, for example <code>EU</code>, <code>US</code> or <code>europe-west1</code>.
+                To find it: BigQuery console &rarr; Personal history (bottom panel) &rarr; open one of your queries &rarr; Location.
+              </span>
+            </label>
+            <label>
+              <span>Projects <span class="optional">optional, comma separated</span></span>
+              <input id="set-projects" type="text" placeholder="Automatic (the project you run it in)" autocomplete="off" spellcheck="false" aria-describedby="projects-help">
+              <span id="projects-help" class="field-help">
+                Project <em>ids</em>, not names, for example <code>acme-prod, acme-test</code>. Find them in the project picker
+                in the console's top bar. All must be in the region above, and you need access to their job history.
+              </span>
+            </label>
+            <datalist id="region-list">
+              <option value="US"><option value="EU">
+              <option value="europe-west1"><option value="europe-west2"><option value="europe-west3"><option value="europe-north1">
+              <option value="us-central1"><option value="us-east1"><option value="us-east4"><option value="us-west1">
+              <option value="asia-northeast1"><option value="asia-southeast1"><option value="australia-southeast1">
+            </datalist>
+            <p id="settings-status" class="privacy" aria-live="polite"></p>
+          </div>
+          <div class="copy-row">
+            <button class="btn primary" id="copy-sql">Copy script</button>
+            <span id="copy-status" class="privacy" aria-live="polite"></span>
+          </div>
+          <details class="faq">
+            <summary>View the script</summary>
+            <pre id="sql-view"></pre>
+          </details>
+        </li>
+        <li>
+          <strong>Click Run.</strong> It takes about a minute and costs a few cents on most projects.
+          It only reads metadata (job history and table storage), never your table data, and changes nothing.
+        </li>
+        <li>
+          <strong>Save the result.</strong> The console lists several steps; open the last one.
+          Click <em>Save results &rarr; CSV (local file)</em>.
+        </li>
+        <li>
+          <strong>Drop the file below.</strong> Your report appears on this page.
+        </li>
+      </ol>
+      <details class="faq">
+        <summary>The report is empty or shows too few queries</summary>
+        <p>BigQuery keeps job history per region and per project, and one run covers one region of one project.
+          Find where your queries run: BigQuery console &rarr; <strong>Personal history</strong> (bottom panel) &rarr;
+          open one of your queries and note its <strong>project</strong> and <strong>location</strong>.
+          Put that location in the <strong>Region</strong> field in step 2 (for example <code>EU</code> or <code>europe-west1</code>)
+          and that project in the <strong>Projects</strong> field, then copy the script again.
+          Data in several regions? Run the script once per region and drop all files here. They are merged into one report.</p>
+      </details>
+      <details class="faq">
+        <summary>BigQuery says it could not compute bytes processed</summary>
+        <p>That's expected. The script builds its queries while it runs, so BigQuery can't estimate the cost in advance.
+          It still runs normally and costs a few cents on most projects.</p>
+      </details>
+      <details class="faq">
+        <summary>Can I check several projects at once?</summary>
+        <p>Yes, if they are in the same region. List them in the <strong>Projects</strong> field in step 2,
+          for example <code>my-project, my-other-project</code>, then copy the script. You need permission to see job history in each project.
+          Including the projects that query each other's tables also makes the unused tables list more accurate.</p>
+      </details>
+      <details class="faq">
+        <summary>I only see my own queries</summary>        <p>Seeing everyone's queries needs the <code>bigquery.jobs.listAll</code> permission,
+          for example through the BigQuery Resource Viewer role. Ask your admin, or run the script as someone who has it.</p>
+      </details>
+      <details class="faq">
+        <summary>How are costs calculated?</summary>
+        <p>Query cost is data billed &times; $6.25 per TiB (on-demand list price). Storage cost is $0.02 per GiB per month
+          for active and $0.01 for long-term storage (logical billing, US list prices).
+          Free tier, discounts and regional prices are not included, so treat the numbers as estimates.
+          If your queries run on capacity pricing (editions, reserved slots), the report says so and the dollar figures
+          show what they would cost on-demand, not what you pay.</p>
+      </details>
+      <details class="faq">
+        <summary>Is my data safe?</summary>
+        <p>Yes. This page runs entirely in your browser and works offline. The file you drop is never uploaded anywhere.</p>
+      </details>
+    </div>
+  </section>
+
+  <!-- drop zone: user drags the csv files here or picks them -->
+  <div id="drop">
+    <p><strong>Drop your cost report file here</strong></p>
+    <p class="privacy">The saved result of the script, as CSV or JSON. Several regions? Drop one file per region.</p>
+    <input type="file" id="file-input" accept=".csv,.json,text/csv,application/json" multiple class="hidden">
+    <button class="btn primary" id="pick">Choose files</button>
+    <button class="btn" id="sample">Load sample data</button>
+    <button class="btn hidden" id="clear">Clear</button>
+    <p class="privacy">Runs fully offline in your browser. Your data is never uploaded anywhere.</p>
+  </div>
+
+  <div id="messages"></div>
+  <div id="report"></div>
+</main>
+
+<!-- the bigquery sql script users copy from the page. edit the sql here, it is the only copy -->
+<script type="text/plain" id="cost-report-sql">
+-- =====================================================================================
+-- bigquery cost report
+-- =====================================================================================
+--
+-- what it does
+--   reads your bigquery metadata (job history and table storage) and answers 4 questions
+--   about cost:
+--     1. cost by user and source   who spends the most, and through what: data studio,
+--                                  looker, power bi, tableau, pigment, scheduled queries,
+--                                  dbt or everything else
+--     2. most expensive queries    which query patterns cost the most
+--     3. cost by table             which tables drive query cost
+--     4. unused tables             which old tables nobody uses, and what they cost to store
+--   it returns one row with all answers as json. drop that file onto bigquery-cost-report.html
+--   to see the report.
+--
+-- what it does not do
+--   it only reads metadata. it does not read your table data and does not change anything.
+--
+-- how to use
+--   1. paste this script into the bigquery console and click run
+--   2. click save results -> csv (local file)
+--   3. drop the file onto bigquery-cost-report.html (the page you copied this from)
+--
+-- settings
+--   region and projects are detected automatically. see the settings block right below.
+--
+-- cost of running it
+--   it reads job history a few times. on most projects that is well under 10 gb, a few cents.
+--
+-- estimates
+--   query cost assumes on-demand pricing ($6.25 per tib billed). storage cost assumes
+--   logical billing at us list prices ($0.02 per gib active, $0.01 per gib long-term, per
+--   month). free tier, discounts and regional prices are not taken into account.
+-- =====================================================================================
+
+-- ---------- settings ----------
+-- region: the script reads one region, your project's default, detected automatically.
+--   report empty or showing too few queries? set your region yourself:
+--     1. find it: bigquery console -> personal history (bottom panel) -> open one of your
+--        queries -> location (e.g. EU, US, europe-west1)
+--     2. remove the "-- " in front of set @@location below and put your region in it
+--   data in several regions? run the script once per region and drop all files onto the page.
+--   the set line must stay the first statement of the script, bigquery requires that.
+-- set @@location = 'EU';
+
+-- projects: the script reads the project it runs in. to include more projects (same region),
+--   list them all, e.g. default ['my-project', 'my-other-project']. you need permission to
+--   see job history in each of them.
+declare projects array<string> default [@@project_id];
+
+-- ---------- working variables (no need to change) ----------
+-- the region as used in INFORMATION_SCHEMA names, e.g. 'region-eu'
+declare region string default concat('region-', lower(@@location));
+-- job history, datasets and table storage of all projects, as union all queries
+declare jobs_sql, schemata_sql, table_storage_sql string;
+-- storage query built per dataset for the unused tables fallback (fits about 4,000 datasets)
+declare storage_sql string;
+-- which method read table sizes for unused tables (see step 4)
+declare storage_method string;
+
+-- each analysis is saved to a temp table (they disappear when the script ends).
+-- the final step packs them into one json value, with long lists cut to the top rows
+-- and full totals kept separately, so the headline numbers stay complete
+
+-- one query per project, glued together, so every step reads all projects at once
+set jobs_sql = (
+  select string_agg(format("select * from `%s.%s`.INFORMATION_SCHEMA.JOBS", p, region), ' union all ')
+  from unnest(projects) as p
+);
+set schemata_sql = (
+  select string_agg(format("select catalog_name, schema_name from `%s.%s`.INFORMATION_SCHEMA.SCHEMATA", p, region), ' union all ')
+  from unnest(projects) as p
+);
+set table_storage_sql = (
+  select string_agg(format("select * from `%s.%s`.INFORMATION_SCHEMA.TABLE_STORAGE", p, region), ' union all ')
+  from unnest(projects) as p
+);
+
+-- ---------- 0. check activity ----------
+-- counts recent queries and datasets, so an empty report can be explained (wrong region).
+-- runs of this script (and other metadata queries) are left out, otherwise a wrong region
+-- would look active after the script ran there once or twice
+execute immediate replace("""
+  create temp table activity as
+  select count(*) as jobs_last_90_days
+  from ({jobs}) as j
+  where
+    creation_time >= timestamp_sub(current_timestamp(), interval 90 day)
+    and job_type = 'QUERY'
+    and (statement_type is null or statement_type != 'SCRIPT')
+    and not contains_substr(query, 'INFORMATION_SCHEMA')
+""", '{jobs}', jobs_sql);
+
+execute immediate replace("""
+  create temp table datasets as
+  select count(*) as dataset_count from ({schemata}) as s
+""", '{schemata}', schemata_sql);
+
+-- ---------- 1. cost by user and source (last 30 days) ----------
+-- one row per person or service account and source: how many queries, how much data was
+-- billed and what it cost. the source shows where queries come from: data studio dashboards,
+-- looker, scheduled queries, dbt runs, or everything else (people in the console, api calls,
+-- other tools). bigquery adds job labels automatically for data studio (formerly looker
+-- studio) and scheduled queries, dbt adds its own. looker (the bi platform) is recognised by
+-- its looker-context job labels or the "Looker Query Context" comment it puts in its sql
+execute immediate replace("""
+  create temp table cost_by_user as
+  select
+    user_email,
+    case
+      when looker_studio_report_id is not null then 'Data Studio'
+      when is_looker then 'Looker'
+      when is_power_bi then 'Power BI'
+      when is_tableau then 'Tableau'
+      when is_pigment then 'Pigment'
+      when data_source_id = 'scheduled_query' then 'Scheduled query'
+      when dbt_invocation_id is not null then 'dbt'
+      else 'Other (console, API, tools)'
+    end as source,
+    -- the dashboard behind data studio queries, empty for other sources
+    looker_studio_report_id as report_id,
+    count(*) as query_count,
+    round(sum(total_bytes_billed) / pow(1024, 3), 2) as gib_billed,
+    round(sum(total_bytes_billed) / pow(1024, 4) * 6.25, 4) as est_cost_usd,
+    round(sum(total_slot_ms) / 1000 / 3600, 2) as slot_hours,
+    -- share of queries served from cache (free)
+    round(countif(cache_hit) / count(*), 2) as cache_hit_share,
+    countif(cache_hit) as cached_query_count,
+    -- queries that ran on capacity pricing (a reservation), where data billed costs nothing.
+    -- default-pipeline is the free shared pool, not a reservation
+    countif(reservation_id is not null and reservation_id != 'default-pipeline') as capacity_query_count
+  from (
+    select
+      j.*,
+      (select value from unnest(labels) where key = 'looker_studio_report_id') as looker_studio_report_id,
+      (select value from unnest(labels) where key = 'data_source_id') as data_source_id,
+      (select value from unnest(labels) where key = 'dbt_invocation_id') as dbt_invocation_id,
+      -- looker: its job labels, or its query context comment at the start of the sql
+      (
+        exists(select 1 from unnest(labels) as l where starts_with(l.key, 'looker-context') or starts_with(l.key, 'looker_context'))
+        or contains_substr(substr(query, 1, 500), 'Looker Query Context')
+      ) as is_looker,
+      -- the other bi and planning tools add no labels of their own, so they are recognised by
+      -- their name in the job labels or in the service account email (e.g. tableau-sa@...),
+      -- and power bi and tableau also by the sql they generate:
+      -- power bi: query folding names its tables `$Table`
+      (
+        regexp_contains(lower(to_json_string(labels)), r'power.?bi')
+        or regexp_contains(lower(user_email), r'power.?bi')
+        or contains_substr(substr(query, 1, 2000), '`$Table`')
+      ) as is_power_bi,
+      -- tableau: its custom sql alias, and column aliases like sum_sales_ok
+      (
+        contains_substr(lower(to_json_string(labels)), 'tableau')
+        or contains_substr(lower(user_email), 'tableau')
+        or contains_substr(substr(query, 1, 2000), '`Custom SQL Query`')
+        or regexp_contains(substr(query, 1, 2000), r'(?i)`(sum|avg|cnt|ctd|min|max|none|usr|attr)_[^`]+_(ok|nk|qk)`')
+      ) as is_tableau,
+      -- pigment: name only, it adds no labels or sql markers of its own
+      (
+        contains_substr(lower(to_json_string(labels)), 'pigment')
+        or contains_substr(lower(user_email), 'pigment')
+      ) as is_pigment
+    from ({jobs}) as j
+    where
+      creation_time >= timestamp_sub(current_timestamp(), interval 30 day)
+      and job_type = 'QUERY'
+      -- skip parent script jobs, their totals repeat the child jobs
+      and (statement_type is null or statement_type != 'SCRIPT')
+  )
+  group by user_email, source, report_id
+""", '{jobs}', jobs_sql);
+
+-- ---------- 2. most expensive query patterns (last 30 days, top 20) ----------
+-- the 20 queries that cost the most. the same query run with different values
+-- (e.g. another date) counts as one pattern, so a cheap query run 10,000 times shows up too.
+execute immediate replace("""
+  create temp table most_expensive_queries as
+  select
+    -- hash of the query text with literals removed, so reruns with other values group together
+    query_info.query_hashes.normalized_literals as query_hash,
+    count(*) as run_count,
+    count(distinct user_email) as user_count,
+    -- the user or service account that spent the most on this query
+    approx_top_sum(user_email, total_bytes_billed, 1)[safe_offset(0)].value as top_user,
+    round(sum(total_bytes_billed) / pow(1024, 3), 2) as gib_billed,
+    round(sum(total_bytes_billed) / pow(1024, 4) * 6.25, 4) as est_cost_usd,
+    round(avg(total_bytes_billed) / pow(1024, 4) * 6.25, 4) as avg_cost_per_run_usd,
+    -- query text of one run, first 300 characters
+    substr(any_value(query), 1, 300) as query_text
+  from ({jobs}) as j
+  where
+    creation_time >= timestamp_sub(current_timestamp(), interval 30 day)
+    and job_type = 'QUERY'
+    and (statement_type is null or statement_type != 'SCRIPT')
+    -- cached queries cost nothing
+    and total_bytes_billed > 0
+  group by query_hash
+  order by est_cost_usd desc
+  limit 20
+""", '{jobs}', jobs_sql);
+
+-- ---------- table sizes (used by steps 3 and 4) ----------
+-- reads the size of every table, using the first method that works:
+--   a. the TABLE_STORAGE view: exact active / long-term split, one query
+--   b. each dataset's __TABLES__ list, when (a) fails (some projects get "access denied").
+--      long-term storage is estimated: a table not changed for 90 days counts as long-term
+--   if both fail, unused tables come back empty with the reason and table costs fall back to
+--   an equal split, the rest of the report still works
+create temp table storage (
+  project_id string, dataset_id string, table_name string, creation_time timestamp,
+  total_rows int64, total_logical_bytes int64, long_term_logical_bytes int64
+);
+
+begin
+  -- method a: TABLE_STORAGE
+  execute immediate replace("""
+    insert into storage
+    select project_id, table_schema, table_name, creation_time, total_rows,
+      total_logical_bytes, long_term_logical_bytes
+    from ({table_storage}) as s
+    where not deleted
+  """, '{table_storage}', table_storage_sql);
+  set storage_method = 'TABLE_STORAGE';
+exception when error then
+  begin
+    -- method b: one __TABLES__ query per dataset, glued together with union all
+    execute immediate replace("""
+      select string_agg(format('''
+        select project_id, dataset_id, table_id, timestamp_millis(creation_time), row_count, size_bytes,
+          if(last_modified_time < unix_millis(timestamp_sub(current_timestamp(), interval 90 day)), size_bytes, 0)
+        from `%s.%s.__TABLES__` where type = 1''', catalog_name, schema_name), ' union all ')
+      from ({schemata}) as s
+    """, '{schemata}', schemata_sql) into storage_sql;
+    if storage_sql is not null then
+      execute immediate 'insert into storage ' || storage_sql;
+    end if;
+    set storage_method = '__TABLES__';
+  exception when error then
+    set storage_method = concat('unavailable: ', @@error.message);
+  end;
+end;
+
+-- snapshot tables: dbt snapshots carry a dbt_valid_from column. if the columns view can't be
+-- read, the list stays empty and snapshots are still recognised by name in step 2
+create temp table snapshot_tables (project_id string, dataset_id string, table_name string);
+begin
+  execute immediate (
+    select concat('insert into snapshot_tables ', string_agg(format("""
+      select distinct table_catalog, table_schema, table_name
+      from `%s.%s`.INFORMATION_SCHEMA.COLUMNS
+      where column_name = 'dbt_valid_from'""", p, region), ' union all '))
+    from unnest(projects) as p
+  );
+exception when error then
+  -- no access to the columns view: nothing to do, the name check still works
+  set storage_method = storage_method;
+end;
+
+-- ---------- 3. cost and usage by table (last 30 days) ----------
+-- which tables cost most to query. the top ones are the best candidates for partitioning
+-- or clustering.
+-- bigquery bills per query, not per table, and job history does not say how many bytes came
+-- from each table. so:
+--   - a query reading one table puts its whole cost on that table (exact)
+--   - a query reading several tables splits its cost by table size, so a 500 gib fact table
+--     gets most of it and a 1 mb lookup table almost nothing. every table weighs at least
+--     10 mb, the minimum bigquery bills per table read
+--   - a table with no known size (in a project outside this report, or deleted since) weighs
+--     as much as an equal share of the query
+-- the split costs add up to the query cost of the report. it is still an estimate: a query
+-- that reads one partition of a big table puts too much on that table
+execute immediate replace("""
+  create temp table cost_by_table as
+  with refs as (
+    -- one row per query and table it read
+    select
+      j.project_id,
+      j.job_id,
+      j.user_email,
+      j.creation_time,
+      j.total_bytes_billed,
+      concat(rt.project_id, '.', rt.dataset_id, '.', rt.table_id) as table_name,
+      s.total_logical_bytes,
+      count(*) over (partition by j.project_id, j.job_id) as tables_in_query
+    from ({jobs}) as j
+    cross join unnest(j.referenced_tables) as rt
+    left join storage as s
+      on s.project_id = rt.project_id and s.dataset_id = rt.dataset_id and s.table_name = rt.table_id
+    where
+      j.creation_time >= timestamp_sub(current_timestamp(), interval 30 day)
+      and j.job_type = 'QUERY'
+      and (j.statement_type is null or j.statement_type != 'SCRIPT')
+      -- skip metadata views, they are not real tables
+      and rt.table_id not like 'INFORMATION_SCHEMA.%'
+      and rt.table_id != '__TABLES__'
+      -- skip temp tables of scripts (including this one), they live in hidden _script datasets
+      and not starts_with(rt.dataset_id, '_script')
+  ),
+
+  weighted as (
+    -- each table's weight in its query: its size (at least 10 mb), or an equal share when unknown
+    select
+      *,
+      greatest(
+        ifnull(total_logical_bytes, ifnull(total_bytes_billed, 0) / tables_in_query),
+        10 * pow(1024, 2)
+      ) as weight
+    from refs
+  ),
+
+  shares as (
+    -- this table's share of the query's billed bytes
+    select
+      *,
+      ifnull(total_bytes_billed, 0) * weight / sum(weight) over (partition by project_id, job_id) as bytes_share
+    from weighted
+  )
+
+  select
+    table_name,
+    count(*) as query_count,
+    count(distinct user_email) as user_count,
+    max(creation_time) as last_queried_at,
+    round(sum(bytes_share) / pow(1024, 4) * 6.25, 4) as est_cost_of_queries_usd
+  from shares
+  group by table_name
+""", '{jobs}', jobs_sql);
+
+-- ---------- 4. unused tables (older than 90 days and not used in 90 days) ----------
+-- tables nobody used in 90 days still cost money to store. these are candidates to
+-- delete or archive. tables created in the last 90 days are left out, they may simply be new.
+-- "used" means read by a query, copy or export job in the projects of this report. reads
+-- from other projects or through the storage read api (e.g. spark) are not visible here.
+-- snapshots (history tables nobody reads on purpose) get a label, so the user decides
+-- whether to keep them
+execute immediate replace("""
+  create temp table unused_tables as
+  with used_tables as (
+    -- every table read by a query, or copied or exported, in the last 90 days.
+    -- a wildcard query (e.g. events_*) shows up as one name ending in *
+    select distinct rt.project_id, rt.dataset_id, rt.table_id
+    from ({jobs}) as j
+    cross join unnest(j.referenced_tables) as rt
+    where j.creation_time >= timestamp_sub(current_timestamp(), interval 90 day)
+  )
+
+  select
+    concat(s.project_id, '.', s.dataset_id, '.', s.table_name) as table_name,
+    s.total_rows,
+    round(s.total_logical_bytes / pow(1024, 3), 2) as size_gib,
+    round(
+      (s.total_logical_bytes - s.long_term_logical_bytes) / pow(1024, 3) * 0.02
+      + s.long_term_logical_bytes / pow(1024, 3) * 0.01,
+      4
+    ) as est_storage_cost_usd_per_month,
+    s.creation_time as created_at,
+    -- snapshot: dbt snapshot columns, or "snapshot" in the dataset or table name.
+    -- snapshots keep history and are often not read for months, so "unused" may be fine
+    if(
+      exists(
+        select 1 from snapshot_tables as st
+        where st.project_id = s.project_id and st.dataset_id = s.dataset_id and st.table_name = s.table_name
+      )
+      or contains_substr(concat(s.dataset_id, '.', s.table_name), 'snapshot'),
+      'snapshot', cast(null as string)
+    ) as label
+  from storage as s
+  where
+    -- skip new tables, nobody may have needed them yet
+    s.creation_time < timestamp_sub(current_timestamp(), interval 90 day)
+    -- skip views and empty tables, they cost nothing to store
+    and s.total_logical_bytes > 0
+    -- keep only tables with no use: no exact match and no matching wildcard
+    and not exists (
+      select 1
+      from used_tables as u
+      where
+        u.project_id = s.project_id
+        and u.dataset_id = s.dataset_id
+        and (
+          u.table_id = s.table_name
+          or (ends_with(u.table_id, '*') and starts_with(s.table_name, rtrim(u.table_id, '*')))
+        )
+    )
+""", '{jobs}', jobs_sql);
+
+-- ---------- final result: one row, one json column for the viewer ----------
+-- all answers packed into one json value, so the user saves and drops a single file.
+-- lists are cut to their top rows to keep the file small; totals cover all rows
+select to_json_string(struct(
+  3 as version,
+  projects,
+  region,
+  current_timestamp() as generated_at,
+  (select jobs_last_90_days from activity) as jobs_last_90_days,
+  (select dataset_count from datasets) as dataset_count,
+  storage_method,
+  -- totals over all rows, before any list is cut
+  (select as struct
+     count(distinct user_email) as user_count,
+     ifnull(sum(query_count), 0) as query_count,
+     ifnull(sum(cached_query_count), 0) as cached_query_count,
+     ifnull(sum(capacity_query_count), 0) as capacity_query_count,
+     ifnull(sum(gib_billed), 0) as gib_billed,
+     ifnull(sum(est_cost_usd), 0) as est_cost_usd,
+     ifnull(sum(slot_hours), 0) as slot_hours
+   from cost_by_user) as query_totals,
+  (select as struct
+     count(*) as table_count,
+     ifnull(sum(total_rows), 0) as total_rows,
+     ifnull(sum(size_gib), 0) as size_gib,
+     ifnull(sum(est_storage_cost_usd_per_month), 0) as est_storage_cost_usd_per_month
+   from unused_tables) as unused_totals,
+  (select count(*) from cost_by_table) as queried_table_count,
+  (select count(*) from cost_by_user) as user_source_row_count,
+  -- the lists, top rows only
+  (select ifnull(array_agg(t order by t.est_cost_usd desc limit 500), []) from cost_by_user as t) as cost_by_user,
+  (select ifnull(array_agg(t order by t.est_cost_usd desc), []) from most_expensive_queries as t) as most_expensive_queries,
+  (select ifnull(array_agg(t order by t.est_cost_of_queries_usd desc limit 200), []) from cost_by_table as t) as cost_by_table,
+  (select ifnull(array_agg(t order by t.est_storage_cost_usd_per_month desc limit 200), []) from unused_tables as t) as unused_tables
+)) as cost_report;
+</script>
+
+<script>
+// keys of each analysis inside the cost report (output of the embedded sql script)
+const report_keys = { '01': 'cost_by_user', '02': 'most_expensive_queries', '03': 'cost_by_table', '04': 'unused_tables' };
+
+// loaded results, keyed by analysis id, each value is an array of row objects
+let data = {};
+
+// sections the user collapsed, remembered in this browser between visits
+let collapsed = new Set();
+try { collapsed = new Set(JSON.parse(localStorage.getItem('collapsed_sections') || '[]')); } catch (e) { /* storage blocked, start expanded */ }
+function save_collapsed() {
+  try { localStorage.setItem('collapsed_sections', JSON.stringify([...collapsed])); } catch (e) { /* not critical */ }
+}
+
+// ---------- csv parsing ----------
+// small csv parser that handles quoted fields, escaped quotes and newlines inside quotes
+// (query_text in most expensive queries contains newlines)
+function parse_csv(text) {
+  const rows = [];
+  let row = [], field = '', in_quotes = false;
+  // strip a byte order mark if present
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (in_quotes) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') in_quotes = false;
+      else field += c;
+    } else if (c === '"') in_quotes = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      // treat \r\n as one line break
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += c;
+  }
+  // last line without a trailing newline
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  const header = (rows.shift() || []).map(h => h.trim().toLowerCase());
+  // turn each line into an object keyed by column name, skip empty lines
+  return {
+    header,
+    rows: rows
+      .filter(r => r.some(v => v !== ''))
+      .map(r => Object.fromEntries(header.map((h, j) => [h, r[j] ?? '']))),
+  };
+}
+
+// ---------- formatting helpers ----------
+const num = v => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
+const sum = (rows, col) => rows.reduce((a, r) => a + num(r[col]), 0);
+function usd(v) {
+  // 4 decimals under $1, cents up to $1000, whole dollars above
+  const n = num(v);
+  const d = n >= 1000 ? 0 : n >= 1 ? 2 : 4;
+  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+function gib(v) {
+  // switch to tib once the number gets large
+  const n = num(v);
+  return n >= 1024 ? (n / 1024).toFixed(2) + ' TiB' : n.toFixed(2) + ' GiB';
+}
+const int = v => Math.round(num(v)).toLocaleString('en-US');
+const pct = v => Math.round(num(v) * 100) + '%';
+// escape text before putting it into html, query text can contain < and &
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// show timestamps as "yyyy-mm-dd hh:mm", from csv ("... UTC") or json ("...T...Z") format
+const ts = v => esc(String(v || '').replace('T', ' ').slice(0, 16));
+
+// ---------- tooltips ----------
+// explanations for terms that need more detail. shown on hover, keyboard focus or tap
+const tips = {
+  unused: `<strong>Unused</strong> means: the table is older than 90 days and no query, copy or export job in the projects of this report used it in the last 90 days.
+    <br><br><strong>Not covered</strong>, so check with the owner before deleting:
+    <ul>
+      <li>reads from projects not listed in the script (their job history lives there)</li>
+      <li>reads through the BigQuery Storage Read API, used by Spark, Dataflow and some Python and BI tools</li>
+      <li>reads older than 90 days, for example a yearly report</li>
+    </ul>
+    Views and empty tables are not listed, they cost nothing to store.`,
+  table_label: `<strong>Snapshot</strong>: a dbt snapshot (it has a dbt_valid_from column) or a table with "snapshot" in its dataset or table name.
+    Snapshots keep history and are often not read for months, so decide yourself whether to keep them.`,
+  query_cost: `Data billed &times; $6.25 per TiB, the on-demand list price.
+    <br><br>Not included: the free 1 TiB per month, discounts and regional price differences.
+    If you pay for capacity (editions, reserved slots), this is not what you pay; look at slot hours instead.`,
+  est_cost: `Estimated on-demand cost: data billed &times; $6.25 per TiB. Free tier, discounts and regional prices are not included.`,
+  data_billed: `The data BigQuery charged for. Includes the minimum of 10 MB per table read by a query. Cached queries bill nothing.`,
+  cache: `Share of queries answered from BigQuery's 24-hour results cache. Cached queries are free.
+    <br><br>The cache is skipped when the query text changes, when it uses functions like <code>current_date()</code>, or when the tables it reads have changed.`,
+  users: `People and service accounts that ran at least one query in the last 30 days, in the projects and region of this report.`,
+  slot_hours: `Compute time used by the queries. On capacity pricing (editions, reserved slots) this drives cost instead of data billed.`,
+  source: `Where queries come from, detected from job labels, service account names and the SQL that tools generate:
+    <ul>
+      <li><strong>Data Studio</strong> (formerly Looker Studio) dashboards</li>
+      <li><strong>Looker</strong>: the Looker BI platform, recognised by its job labels or the query context comment it adds to its SQL</li>
+      <li><strong>Power BI</strong>, <strong>Tableau</strong>, <strong>Pigment</strong>: recognised by the tool's name in job labels or in the
+        service account email (for example <code>tableau-sa@...</code>), and for Power BI and Tableau also by the SQL they generate.
+        If a tool runs under a person's account or a neutrally named service account, its queries land in Other</li>
+      <li><strong>Scheduled query</strong>: BigQuery scheduled queries</li>
+      <li><strong>dbt</strong>: dbt runs</li>
+      <li><strong>Other</strong>: everything without these markers, such as people in the console, Tableau, Python and other API clients</li>
+    </ul>`,
+  dashboard: `The Data Studio report that ran these queries. Opens the report if you have access to it.`,
+  query_pattern: `Queries that are identical except for values (dates, ids, filters) are grouped into one pattern.
+    The text shown is one example run, cut to 300 characters. Cached runs are left out, they cost nothing.`,
+  top_user: `The user or service account that spent the most on this query pattern.`,
+  cost_per_run: `Average estimated cost of one run of this pattern.`,
+  table_query_cost: `This table's share of the cost of the queries that read it.
+    <ul>
+      <li>A query reading only this table: its whole cost</li>
+      <li>A query reading several tables: its cost split by table size, so a big fact table carries most of it
+        and a small lookup table almost nothing. Each table counts at least 10 MB, the minimum BigQuery bills per table</li>
+      <li>Tables with no known size (in projects outside this report, or deleted since): an equal share</li>
+    </ul>
+    The shares add up to the query cost of the report. Still an estimate: BigQuery bills per query, not per table,
+    so a query that reads one partition of a big table puts too much on that table.`,
+  last_queried: `The last time a query read this table, within the last 30 days.`,
+  size_logical: `Uncompressed size. If a dataset uses physical (compressed) storage billing, the size you pay for is smaller.`,
+  storage_month: `Logical storage at US list prices: $0.02 per GiB for active storage, $0.01 per GiB for long-term storage
+    (not changed for 90 days). The free 10 GiB per month and regional prices are not included.`,
+};
+
+// tooltip shown on each section title
+const section_tips = { '01': 'source', '02': 'query_pattern', '03': 'table_query_cost', '04': 'unused' };
+
+// a term with a dotted underline that shows its tooltip
+function tip(label, key) {
+  return `<span class="term" tabindex="0" data-tip="${key}">${label}</span>`;
+}
+
+// one floating tooltip for the whole page, so it is never cut off by scrolling tables
+const tooltip = document.createElement('div');
+tooltip.id = 'tooltip';
+tooltip.setAttribute('role', 'tooltip');
+document.body.appendChild(tooltip);
+let tip_target = null;
+
+function show_tip(el) {
+  const text = tips[el.dataset.tip];
+  if (!text) return;
+  tip_target = el;
+  tooltip.innerHTML = text;
+  tooltip.classList.add('visible');
+  el.setAttribute('aria-describedby', 'tooltip');
+  // below the term, kept inside the window; above it when there is no room below
+  const r = el.getBoundingClientRect(), t = tooltip.getBoundingClientRect();
+  const left = Math.min(Math.max(8, r.left), window.innerWidth - t.width - 8);
+  const top = r.bottom + 8 + t.height > window.innerHeight ? r.top - t.height - 8 : r.bottom + 8;
+  tooltip.style.left = left + 'px';
+  tooltip.style.top = Math.max(8, top) + 'px';
+}
+
+function hide_tip() {
+  if (tip_target) tip_target.removeAttribute('aria-describedby');
+  tip_target = null;
+  tooltip.classList.remove('visible');
+}
+
+document.addEventListener('mouseover', ev => { const el = ev.target.closest('[data-tip]'); if (el && el !== tip_target) show_tip(el); });
+document.addEventListener('mouseout', ev => { const el = ev.target.closest('[data-tip]'); if (el && !el.contains(ev.relatedTarget)) hide_tip(); });
+// keyboard and touch: focusing a term (tab or tap) shows it, leaving hides it
+document.addEventListener('focusin', ev => { const el = ev.target.closest('[data-tip]'); if (el) show_tip(el); });
+document.addEventListener('focusout', ev => { if (ev.target.closest('[data-tip]')) hide_tip(); });
+document.addEventListener('keydown', ev => { if (ev.key === 'Escape') hide_tip(); });
+window.addEventListener('scroll', hide_tip, { passive: true });
+
+// ---------- building blocks ----------
+// horizontal bar list: label, bar scaled to the max value, formatted value
+function bar_list(rows, label_fn, value_fn, fmt, limit = 10) {
+  const top = rows.slice().sort((a, b) => value_fn(b) - value_fn(a)).slice(0, limit);
+  const max = Math.max(...top.map(value_fn), 0);
+  if (!top.length) return '<p class="empty">No rows.</p>';
+  return '<div class="bars">' + top.map(r => {
+    const w = max > 0 ? (value_fn(r) / max) * 100 : 0;
+    return `<div class="bar-row">
+      <div class="bar-label" title="${esc(label_fn(r))}">${esc(label_fn(r))}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${w}%"></div></div>
+      <div class="bar-value">${fmt(value_fn(r))}</div>
+    </div>`;
+  }).join('') + '</div>';
+}
+
+// simple table: cols = [{label, html: row => string, num: bool}]
+function table(rows, cols, total_row) {
+  if (!rows.length) return '<p class="empty">No rows.</p>';
+  // optional total row shown first, total_row holds the cell html per column label position
+  const total = total_row ? `<tr class="total-row">${cols.map((c, i) => `<td class="${c.num ? 'num' : ''}">${total_row[i] ?? ''}</td>`).join('')}</tr>` : '';
+  return `<div class="table-wrap"><table>
+    <thead><tr>${cols.map(c => `<th class="${c.num ? 'num' : ''}">${c.label}</th>`).join('')}</tr></thead>
+    <tbody>${total}${rows.map(r => `<tr>${cols.map(c => `<td class="${c.num ? 'num' : ''}">${c.html(r)}</td>`).join('')}</tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+// section card with a collapse button in the top right corner
+// key identifies the section, so its collapsed state survives re-renders and reloads
+function card(key, title, explain, body, tip_key) {
+  const is_collapsed = collapsed.has(key);
+  return `<section class="card ${is_collapsed ? 'collapsed' : ''}" data-key="${key}">
+    <div class="card-head">
+      <h2>${tip_key ? tip(title, tip_key) : title}</h2>
+      <button class="toggle" aria-expanded="${!is_collapsed}" title="${is_collapsed ? 'Expand' : 'Collapse'}" aria-label="${is_collapsed ? 'Expand' : 'Collapse'} ${title}"></button>
+    </div>
+    ${explain ? `<p class="hint">${explain}</p>` : ''}
+    <div class="card-body">${body}</div>
+  </section>`;
+}
+
+// section for one analysis
+function section(id, title, explain, body_fn) {
+  return card(id, title, explain, body_fn(data[id] || []), section_tips[id]);
+}
+
+// collapse or expand a section when its button is clicked
+document.addEventListener('click', ev => {
+  const btn = ev.target.closest('.toggle');
+  if (!btn) return;
+  const sec = btn.closest('.card');
+  const key = sec.dataset.key;
+  const now_collapsed = sec.classList.toggle('collapsed');
+  if (now_collapsed) collapsed.add(key); else collapsed.delete(key);
+  btn.setAttribute('aria-expanded', String(!now_collapsed));
+  btn.title = now_collapsed ? 'Expand' : 'Collapse';
+  save_collapsed();
+});
+
+// ---------- savings hints ----------
+// simple rules that turn the numbers into actions
+function build_hints() {
+  const hints = [];
+  const t = current_totals();
+  if (t.unused_count > 0) {
+    hints.push(`<strong>${int(t.unused_count)} tables</strong> older than 90 days were not used in that time. They cost about <strong>${usd(t.unused_cost)}/month</strong> in storage. Delete or archive the ones nobody needs.`);
+  }
+  if (data['02']) {
+    // select * on wide tables is the classic waste
+    const star = data['02'].filter(r => /select\s+\*/i.test(r.query_text));
+    if (star.length) {
+      hints.push(`<strong>${star.length} of the top queries</strong> use <code>select *</code> (${usd(sum(star, 'est_cost_usd'))} in 30 days). BigQuery bills per column read, so selecting only needed columns cuts cost directly.`);
+    }
+    // a query pattern that runs very often is a candidate for a materialised table
+    const repeated = data['02'].filter(r => num(r.run_count) >= 100).sort((a, b) => num(b.est_cost_usd) - num(a.est_cost_usd))[0];
+    if (repeated) {
+      hints.push(`One query pattern ran <strong>${int(repeated.run_count)} times</strong> (${usd(repeated.est_cost_usd)}). If the data doesn't change that often, save the result to a table and query that instead.`);
+    }
+  }
+  if (data['01']) {
+    // cache share across all queries
+    const q = t.query_count, cached = t.cached_query_count;
+    if (q > 50 && cached / q < 0.2) {
+      hints.push(`Only <strong>${pct(cached / q)}</strong> of queries are served from cache, and cached queries are free. Non-deterministic functions like <code>current_date()</code> and changing query text disable the cache.`);
+    }
+  }
+  if (data['03'] && data['03'].length > 1) {
+    // one table dominating query cost is the best partitioning/clustering candidate
+    const top = data['03'].slice().sort((a, b) => num(b.est_cost_of_queries_usd) - num(a.est_cost_of_queries_usd))[0];
+    const total = sum(data['03'], 'est_cost_of_queries_usd');
+    if (total > 0 && num(top.est_cost_of_queries_usd) / total > 0.4) {
+      hints.push(`<code>${esc(top.table_name)}</code> is behind most query cost. Check that it's partitioned and clustered on the columns people filter by.`);
+    }
+  }
+  if (data['01']) {
+    const total = sum(data['01'], 'est_cost_usd');
+    const by = src => sum(data['01'].filter(r => r.source === src), 'est_cost_usd');
+    if (total > 0 && by('Scheduled query') / total > 0.3) {
+      hints.push(`Scheduled queries are <strong>${pct(by('Scheduled query') / total)}</strong> of query cost. Check whether each one needs to run that often.`);
+    }
+    if (total > 0 && by('Data Studio') / total > 0.3) {
+      hints.push(`Data Studio dashboards are <strong>${pct(by('Data Studio') / total)}</strong> of query cost. Every dashboard view runs queries; use extracts or a pre-aggregated table for busy reports.`);
+    }
+    if (total > 0 && by('Looker') / total > 0.3) {
+      hints.push(`Looker is <strong>${pct(by('Looker') / total)}</strong> of query cost. Check that explores use persistent derived tables or aggregate awareness for heavy dashboards, and that caching policies (datagroups) are not too short.`);
+    }
+    // bi tools querying bigquery live: every dashboard view or refresh runs queries
+    const bi = ['Power BI', 'Tableau'].map(src => ({ src, share: total > 0 ? by(src) / total : 0 })).filter(b => b.share > 0.2);
+    bi.forEach(b => {
+      hints.push(`${b.src} is <strong>${pct(b.share)}</strong> of query cost. Live connections (DirectQuery in Power BI, live in Tableau) query BigQuery on every view; scheduled extracts or import mode on a pre-aggregated table usually cost far less.`);
+    });
+    if (total > 0 && by('Pigment') / total > 0.2) {
+      hints.push(`Pigment imports are <strong>${pct(by('Pigment') / total)}</strong> of query cost. Check that imports read only the columns and date range Pigment needs, and run no more often than the data changes.`);
+    }
+    if (total > 0 && by('dbt') / total > 0.3) {
+      hints.push(`dbt runs are <strong>${pct(by('dbt') / total)}</strong> of query cost. Large models rebuilt in full every run are the usual cause; make them incremental and run them only as often as the data changes.`);
+    }
+  }
+  if (data['02']) {
+    // limit does not reduce what bigquery reads, a common misunderstanding
+    const limited = data['02'].filter(r => /\blimit\s+\d+/i.test(r.query_text) && /select\s+\*/i.test(r.query_text));
+    if (limited.length) {
+      hints.push(`<strong>${limited.length} of the top queries</strong> use <code>select * ... limit</code>. <code>LIMIT</code> does not reduce the data BigQuery reads or bills. To look at data, use the free table preview in the console instead.`);
+    }
+  }
+  // capacity pricing: compare on-demand cost with what the slot hours would cost on editions
+  if (t.slot_hours > 0 && t.est_cost_usd > 500) {
+    // enterprise edition pay-as-you-go, us list price, doubled as a rough allowance for
+    // autoscaling, which bills more slot time than queries actually use
+    const editions_cost = t.slot_hours * 0.06 * 2;
+    if (editions_cost < t.est_cost_usd * 0.6) {
+      hints.push(`Your queries used <strong>${int(t.slot_hours)} slot hours</strong>. On capacity pricing (BigQuery editions) that could cost roughly <strong>${usd(editions_cost)}</strong> instead of ${usd(t.est_cost_usd)} on-demand. A rough estimate, worth checking with the BigQuery slot estimator in the console.`);
+    }
+  }
+  return hints;
+}
+
+// general good practice, shown under the hints for every report
+const general_tips = [
+  `<strong>Cap what a query can cost.</strong> Set custom quotas (query usage per day, per user or project) in the Google Cloud console, and "maximum bytes billed" in tools that support it.`,
+  `<strong>Partition and cluster big tables</strong> on the columns people filter by, and set <code>require_partition_filter</code> so nobody scans the whole table by accident.`,
+  `<strong>Preview, don't query.</strong> The table preview in the console is free; <code>select * ... limit 10</code> bills the whole table.`,
+  `<strong>Check physical storage billing.</strong> It bills compressed size at a higher rate per GiB. For data that compresses well it is often cheaper overall; the dataset's storage info shows both sizes.`,
+  `<strong>Expire scratch data.</strong> Set a default table expiration on sandbox and staging datasets, so test tables delete themselves.`,
+];
+
+// ---------- main render ----------
+function render() {
+  const loaded = Object.keys(data);
+  document.getElementById('clear').classList.toggle('hidden', !loaded.length);
+
+  if (!loaded.length) { document.getElementById('report').innerHTML = ''; return; }
+
+  // kpi tiles
+  const kpis = [];
+  const t = current_totals();
+  if (data['01']) {
+    kpis.push([tip('Est. query cost, last 30 days', 'query_cost'), usd(t.est_cost_usd), 'on-demand list price']);
+    kpis.push([tip('Data billed', 'data_billed'), gib(t.gib_billed), int(t.query_count) + ' queries']);
+    kpis.push([tip('Served from cache', 'cache'), t.query_count ? pct(t.cached_query_count / t.query_count) : '&ndash;', 'cached queries are free']);
+    kpis.push([tip('Users and accounts', 'users'), int(t.user_count), 'ran queries in 30 days']);
+  }
+  if (data['04']) {
+    kpis.push([tip('Unused tables', 'unused'), int(t.unused_count), usd(t.unused_cost) + '/month storage']);
+  }
+  let html = region_info();
+  // queries on a reservation do not bill data, so their dollar figures are not real costs
+  // (reports from older script versions have no capacity count, then nothing is shown)
+  if (t.capacity_query_count > 0 && t.query_count > 0) {
+    const share = t.capacity_query_count / t.query_count;
+    html += `<ul class="hints"><li><strong>${pct(share)} of queries ran on capacity pricing</strong> (a slot reservation).
+      You pay for their slot time, not the data they read, so their dollar figures below show what they would cost
+      on-demand, not what you pay.${share > 0.9 ? ' Compare by slot hours instead.' : ''}</li></ul>`;
+  }
+  html += kpis.length ? `<div id="kpis">${kpis.map(k =>
+    `<div class="kpi"><div class="label">${k[0]}</div><div class="value">${k[1]}</div><div class="note">${k[2]}</div></div>`).join('')}</div>` : '';
+
+  // savings hints
+  const hints = build_hints();
+  html += card('hints', 'Where to save', hints.length ? 'Based on the results you loaded.' : '',
+    (hints.length ? `<ul class="hints">${hints.map(h => `<li>${h}</li>`).join('')}</ul>` : '') +
+    `<h3 class="sub-head">Good practice for any project</h3>
+     <ul class="tips">${general_tips.map(g => `<li>${g}</li>`).join('')}</ul>`);
+
+  // 01 cost by user and source
+  html += section('01', 'Cost by user and source', 'Who spends the most on queries in the last 30 days, and through what: Data Studio, Looker, Power BI, Tableau, Pigment, scheduled queries, dbt, or people and other tools.', rows => {
+    // add up rows per source and per user for the two bar charts
+    const group = (key_fn) => {
+      const g = {};
+      rows.forEach(r => { const k = key_fn(r); g[k] = (g[k] || 0) + num(r.est_cost_usd); });
+      return Object.entries(g).map(([label, cost]) => ({ label, cost }));
+    };
+    return cut_note(rows.length, current_totals().row_count, 'user and source rows') +
+      `<div class="charts">
+        <div><h3>By source</h3>${bar_list(group(r => r.source || 'Unknown'), r => r.label, r => r.cost, usd)}</div>
+        <div><h3>By user</h3>${bar_list(group(r => r.user_email), r => r.label, r => r.cost, usd)}</div>
+      </div>` +
+      table(rows, [
+        { label: 'User or service account', html: r => esc(r.user_email) },
+        { label: tip('Source', 'source'), html: r => esc(r.source || '') },
+        // data studio rows carry a report id, link it so the user can open the dashboard
+        { label: tip('Dashboard', 'dashboard'), html: r => r.report_id
+          ? `<a href="https://datastudio.google.com/reporting/${encodeURIComponent(r.report_id)}" target="_blank" rel="noopener">Open report</a>`
+          : '' },
+        { label: 'Queries', num: true, html: r => int(r.query_count) },
+        { label: tip('Data billed', 'data_billed'), num: true, html: r => gib(r.gib_billed) },
+        { label: tip('Est. cost', 'est_cost'), num: true, html: r => usd(r.est_cost_usd) },
+        { label: tip('Slot hours', 'slot_hours'), num: true, html: r => num(r.slot_hours).toFixed(2) },
+        { label: tip('Served from cache', 'cache'), num: true, html: r => pct(r.cache_hit_share) },
+      ]);
+  });
+
+  // 02 most expensive queries
+  html += section('02', 'Most expensive queries', 'Top query patterns in 30 days. The same query run with different values counts as one pattern.', rows =>
+    table(rows, [
+      { label: '#', num: true, html: r => rows.indexOf(r) + 1 },
+      { label: tip('Query', 'query_pattern'), html: r => {
+        // first line as a preview, full text on click
+        const q = String(r.query_text || '');
+        const first = q.split('\n').find(l => l.trim() && !l.trim().startsWith('--')) || q.split('\n')[0];
+        const star = /select\s+\*/i.test(q) ? '<span class="tag">select *</span>' : '';
+        return `<details><summary>${esc(first.slice(0, 80))}</summary><pre>${esc(q)}</pre></details>${star}`;
+      } },
+      { label: 'Runs', num: true, html: r => int(r.run_count) },
+      { label: tip('Top user', 'top_user'), html: r => esc(r.top_user) },
+      { label: tip('Data billed', 'data_billed'), num: true, html: r => gib(r.gib_billed) },
+      { label: tip('Est. cost', 'est_cost'), num: true, html: r => usd(r.est_cost_usd) },
+      { label: tip('Est. cost per run', 'cost_per_run'), num: true, html: r => '$' + num(r.avg_cost_per_run_usd).toFixed(4) },
+    ]));
+
+  // 03 cost by table
+  html += section('03', 'Cost by table', 'Each table\'s share of query cost in the last 30 days. Queries reading several tables split their cost by table size. Point at the title for details.', rows =>
+    cut_note(rows.length, current_totals().table_count, 'tables') +
+    bar_list(rows, r => r.table_name, r => num(r.est_cost_of_queries_usd), usd) +
+    table(rows, [
+      { label: 'Table', html: r => `<code>${esc(r.table_name)}</code>` },
+      { label: 'Queries', num: true, html: r => int(r.query_count) },
+      { label: 'Users', num: true, html: r => int(r.user_count) },
+      { label: tip('Last queried', 'last_queried'), html: r => ts(r.last_queried_at) },
+      { label: tip('Est. query cost', 'table_query_cost'), num: true, html: r => usd(r.est_cost_of_queries_usd) },
+    ]));
+
+  // 04 unused tables
+  html += section('04', 'Unused tables', 'Tables older than 90 days that nobody used in the last 90 days. Candidates to delete or archive. Point at the title to see what this check can miss, and ask the owner before deleting.', rows =>
+    storage_note() + cut_note(rows.length, current_totals().unused_count, 'unused tables') +
+    table(rows, [
+      // label from the script (e.g. snapshot) as a small tag under the name, with its explanation on hover
+      { label: 'Table', html: r => `<code>${esc(r.table_name)}</code>` + (r.label
+        ? `<span class="tag below" tabindex="0" data-tip="table_label">${esc(r.label)}</span>` : '') },
+      { label: 'Rows', num: true, html: r => int(r.total_rows) },
+      { label: tip('Size (logical)', 'size_logical'), num: true, html: r => gib(r.size_gib) },
+      { label: tip('Est. storage / month', 'storage_month'), num: true, html: r => usd(r.est_storage_cost_usd_per_month) },
+      { label: 'Created', html: r => ts(r.created_at) },
+    ], (() => {
+      // total over all unused tables, including those not shown in the list
+      const t = current_totals();
+      return [`Total, ${int(t.unused_count)} tables`, int(t.unused_rows), gib(t.unused_size), usd(t.unused_cost), ''];
+    })()));
+
+  document.getElementById('report').innerHTML = html;
+}
+
+// ---------- loading files ----------
+function show_message(text) {
+  document.getElementById('messages').innerHTML = text ? `<section class="card"><p class="hint" style="margin:0">${text}</p></section>` : '';
+}
+
+// loaded reports, one per region. a company with data in several regions runs the
+// script once per region and drops all files, the viewer merges them
+let reports = {};
+
+// load one report file: a json string with all 5 analyses inside
+function load_report(json_text) {
+  const report = JSON.parse(json_text);
+  reports[report.region || 'unknown'] = report;
+  merge_reports();
+}
+
+// add up rows that share the same key (e.g. the same user in two regions)
+function merge_rows(rows, key_fn, sum_cols) {
+  const merged = {};
+  for (const r of rows) {
+    const k = key_fn(r);
+    if (!merged[k]) { merged[k] = { ...r }; continue; }
+    for (const c of sum_cols) merged[k][c] = num(merged[k][c]) + num(r[c]);
+  }
+  return Object.values(merged);
+}
+
+// combine all loaded reports into the 4 analyses the page shows
+function merge_reports() {
+  const all = key => Object.values(reports).flatMap(rep => rep[key] || []);
+  const by_cost = col => (a, b) => num(b[col]) - num(a[col]);
+  const distinct_users = rows => new Set(rows.map(r => r.user_email)).size;
+
+  // cost by user and source: the same user, source and dashboard can appear in several
+  // regions, add them up. cache share is a ratio, so add cached queries and divide at the end
+  const users = merge_rows(
+    all('cost_by_user').map(r => ({ ...r, cached_queries: num(r.cache_hit_share) * num(r.query_count) })),
+    r => [r.user_email, r.source, r.report_id].join('|'),
+    ['query_count', 'gib_billed', 'est_cost_usd', 'slot_hours', 'cached_queries', 'capacity_query_count']);
+  users.forEach(r => { r.cache_hit_share = num(r.query_count) ? r.cached_queries / num(r.query_count) : 0; });
+  data['01'] = users.sort(by_cost('est_cost_usd'));
+
+  // top queries: keep the 20 most expensive across all regions
+  data['02'] = all('most_expensive_queries').sort(by_cost('est_cost_usd')).slice(0, 20);
+  // tables and unused tables belong to one region each, just combine
+  data['03'] = all('cost_by_table').sort(by_cost('est_cost_of_queries_usd'));
+  data['04'] = all('unused_tables').sort(by_cost('est_storage_cost_usd_per_month'));
+
+  // totals over all rows: the script cuts long lists to their top rows, so headline
+  // numbers come from the totals it sends along (reports from older versions have none)
+  const list = Object.values(reports);
+  if (list.every(r => r.query_totals && r.unused_totals)) {
+    const add = (key, col) => list.reduce((a, r) => a + num(r[key][col]), 0);
+    // when no list was cut, count users from the rows (the same user in two regions is one user)
+    const lists_complete = list.every(r => (r.cost_by_user || []).length >= num(r.user_source_row_count));
+    totals = {
+      user_count: lists_complete ? distinct_users(data['01']) : add('query_totals', 'user_count'),
+      row_count: list.reduce((a, r) => a + num(r.user_source_row_count), 0),
+      query_count: add('query_totals', 'query_count'),
+      cached_query_count: add('query_totals', 'cached_query_count'),
+      capacity_query_count: add('query_totals', 'capacity_query_count'),
+      gib_billed: add('query_totals', 'gib_billed'),
+      est_cost_usd: add('query_totals', 'est_cost_usd'),
+      unused_count: add('unused_totals', 'table_count'),
+      unused_cost: add('unused_totals', 'est_storage_cost_usd_per_month'),
+      unused_rows: add('unused_totals', 'total_rows'),
+      unused_size: add('unused_totals', 'size_gib'),
+      slot_hours: add('query_totals', 'slot_hours'),
+      table_count: list.reduce((a, r) => a + num(r.queried_table_count), 0),
+    };
+  } else {
+    totals = null;
+  }
+}
+
+// totals for the headline numbers: from the script when available, else added up from the rows
+let totals = null;
+function current_totals() {
+  if (totals) return totals;
+  const users = data['01'] || [], unused = data['04'] || [];
+  return {
+    user_count: new Set(users.map(r => r.user_email)).size,
+    row_count: users.length,
+    query_count: sum(users, 'query_count'),
+    cached_query_count: users.reduce((a, r) => a + num(r.cache_hit_share) * num(r.query_count), 0),
+    capacity_query_count: sum(users, 'capacity_query_count'),
+    gib_billed: sum(users, 'gib_billed'),
+    est_cost_usd: sum(users, 'est_cost_usd'),
+    unused_count: unused.length,
+    unused_cost: sum(unused, 'est_storage_cost_usd_per_month'),
+    unused_rows: sum(unused, 'total_rows'),
+    unused_size: sum(unused, 'size_gib'),
+    slot_hours: sum(users, 'slot_hours'),
+    table_count: (data['03'] || []).length,
+  };
+}
+
+// note in the unused tables section about how table sizes were read (see step 4 of the script)
+function storage_note() {
+  const notes = Object.values(reports).map(r => {
+    const m = String(r.storage_method || '');
+    if (m.startsWith('unavailable')) {
+      return `<li>Could not read table sizes in <code>${esc(r.region)}</code>, so unused tables are missing for it. BigQuery said: ${esc(m.replace(/^unavailable: /, ''))}</li>`;
+    }
+    if (m === '__TABLES__') {
+      return `<li>Storage cost in <code>${esc(r.region)}</code> is estimated: a table not changed for 90 days counts as long-term storage.</li>`;
+    }
+    return '';
+  }).filter(Boolean);
+  return notes.length ? `<ul class="hints">${notes.join('')}</ul>` : '';
+}
+
+// note under a section when the list shows only the top rows of a longer list
+function cut_note(shown, total, what) {
+  return total > shown ? `<p class="hint">Showing the top ${int(shown)} of ${int(total)} ${what}.</p>` : '';
+}
+
+// one line about the regions in the report, plus a warning for regions without activity
+function region_info() {
+  const list = Object.values(reports);
+  if (!list.length) return '';
+  // "project / region" for each loaded report
+  const names = list.map(r => {
+    const projects = r.projects || (r.project_id ? [r.project_id] : []);
+    return `<code>${esc((projects.length ? projects.join(', ') + ' / ' : '') + r.region)}</code>`;
+  }).join('; ');
+  const when = list.map(r => r.generated_at).filter(Boolean).sort().pop();
+  let html = `<p class="hint">Project / region: ${names}${when ? ` &middot; generated ${ts(when)} UTC` : ''}</p>`;
+  // fewer than 10 queries in 90 days almost always means the wrong region or project
+  const empty = list.filter(r => typeof r.jobs_last_90_days === 'number' && r.jobs_last_90_days < 10);
+  if (empty.length) {
+    html += `<ul class="hints"><li>Almost no queries found in ${empty.map(r => `<code>${esc(r.region)}</code> (${r.jobs_last_90_days} in 90 days)`).join(', ')}.
+      Your queries probably run in another region or project. To find them: BigQuery console &rarr; <strong>Personal history</strong> (bottom panel)
+      &rarr; open one of your queries and note its <strong>project</strong> and <strong>location</strong>.
+      Enter them in the <strong>Region</strong> and <strong>Projects</strong> fields under How it works, step 2, then copy and run the script again.</li></ul>`;
+  }
+  return html;
+}
+
+async function handle_files(files) {
+  const unknown = [];
+  for (const file of files) {
+    const text = (await file.text()).replace(/^\ufeff/, '').trim();
+    try {
+      if (text.startsWith('[') || text.startsWith('{')) {
+        // json download from the console: [{"cost_report": "{...}"}]
+        const rows = JSON.parse(text);
+        const row = Array.isArray(rows) ? rows[0] : rows;
+        if (row && row.cost_report) { load_report(row.cost_report); continue; }
+      } else {
+        const parsed = parse_csv(text);
+        // csv download from the console: one column, one row
+        if (parsed.header.includes('cost_report') && parsed.rows.length) { load_report(parsed.rows[0].cost_report); continue; }
+      }
+    } catch (e) { /* broken file, reported below */ }
+    unknown.push(esc(file.name));
+  }
+  // tell the user about files that are not a cost report
+  show_message(unknown.length ? `Not recognised: ${unknown.join(', ')}. Make sure it's the result of the script on this page, saved as CSV or JSON.` : '');
+  render();
+}
+
+// drag and drop anywhere on the page
+const drop = document.getElementById('drop');
+['dragenter', 'dragover'].forEach(e => document.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(e => document.addEventListener(e, ev => { ev.preventDefault(); if (e === 'drop' || !ev.relatedTarget) drop.classList.remove('over'); }));
+document.addEventListener('drop', ev => handle_files([...ev.dataTransfer.files]));
+
+// file picker
+document.getElementById('pick').onclick = () => document.getElementById('file-input').click();
+document.getElementById('file-input').onchange = ev => { handle_files([...ev.target.files]); ev.target.value = ''; };
+document.getElementById('clear').onclick = () => { data = {}; reports = {}; totals = null; show_message(''); render(); };
+
+// ---------- sample data ----------
+// made-up numbers for a small company, so people can see the report before running anything
+document.getElementById('sample').onclick = () => {
+  reports = {};
+  totals = null;
+  data = {
+    '01': [
+      { user_email: 'looker-sa@acme-prod.iam.gserviceaccount.com', source: 'Data Studio', report_id: '7f3c2a1e-5b8d-4e21-9c6a-0d4f8e2b1a37', query_count: '14210', gib_billed: '33120.5', est_cost_usd: '202.15', slot_hours: '640.4', cache_hit_share: '0.44' },
+      { user_email: 'looker-sa@acme-prod.iam.gserviceaccount.com', source: 'Data Studio', report_id: '2b9e4d10-77aa-4c3e-8f21-5d0c6e9a4b12', query_count: '4210', gib_billed: '8090.0', est_cost_usd: '49.38', slot_hours: '172.0', cache_hit_share: '0.31' },
+      { user_email: 'tableau-sa@acme-prod.iam.gserviceaccount.com', source: 'Tableau', report_id: null, query_count: '3980', gib_billed: '5210.0', est_cost_usd: '31.80', slot_hours: '120.6', cache_hit_share: '0.09' },
+      { user_email: 'looker@acme-prod.iam.gserviceaccount.com', source: 'Looker', report_id: null, query_count: '6120', gib_billed: '12400.0', est_cost_usd: '75.68', slot_hours: '310.2', cache_hit_share: '0.18' },
+      { user_email: 'dbt-runner@acme-prod.iam.gserviceaccount.com', source: 'dbt', report_id: null, query_count: '2310', gib_billed: '28940.2', est_cost_usd: '176.64', slot_hours: '1420.8', cache_hit_share: '0.02' },
+      { user_email: 'anna@acme.com', source: 'Other (console, API, tools)', report_id: null, query_count: '1180', gib_billed: '9420.7', est_cost_usd: '57.50', slot_hours: '201.3', cache_hit_share: '0.12' },
+      { user_email: 'anna@acme.com', source: 'Scheduled query', report_id: null, query_count: '60', gib_billed: '400.0', est_cost_usd: '2.44', slot_hours: '9.0', cache_hit_share: '0.0' },
+      { user_email: 'mark@acme.com', source: 'Other (console, API, tools)', report_id: null, query_count: '860', gib_billed: '3110.4', est_cost_usd: '18.98', slot_hours: '64.1', cache_hit_share: '0.22' },
+      { user_email: 'scheduler@acme-prod.iam.gserviceaccount.com', source: 'Scheduled query', report_id: null, query_count: '8640', gib_billed: '2410.9', est_cost_usd: '14.71', slot_hours: '95.2', cache_hit_share: '0.0' },
+    ],
+    '02': [
+      { query_hash: 'a1', run_count: '4320', user_count: '1', top_user: 'looker-sa@acme-prod.iam.gserviceaccount.com', gib_billed: '20480.0', est_cost_usd: '125.0', avg_cost_per_run_usd: '0.0289', query_text: 'select date(created_at) as day, country, sum(revenue) as revenue\nfrom analytics.orders\nwhere created_at >= timestamp_sub(current_timestamp(), interval 90 day)\ngroup by 1, 2' },
+      { query_hash: 'b2', run_count: '31', user_count: '1', top_user: 'anna@acme.com', gib_billed: '7900.0', est_cost_usd: '48.22', avg_cost_per_run_usd: '1.5554', query_text: 'select *\nfrom raw.events\nwhere event_name = \'purchase\'' },
+      { query_hash: 'c3', run_count: '30', user_count: '1', top_user: 'dbt-runner@acme-prod.iam.gserviceaccount.com', gib_billed: '6140.0', est_cost_usd: '37.48', avg_cost_per_run_usd: '1.2492', query_text: 'create or replace table marts.fct_sessions as\nselect session_id, user_id, min(event_ts) as started_at\nfrom raw.events\ngroup by 1, 2' },
+      { query_hash: 'd4', run_count: '288', user_count: '1', top_user: 'scheduler@acme-prod.iam.gserviceaccount.com', gib_billed: '1980.0', est_cost_usd: '12.08', avg_cost_per_run_usd: '0.0420', query_text: 'insert into ops.stock_snapshot\nselect * from erp.stock_levels' },
+    ],
+    '03': [
+      { table_name: 'acme-prod.raw.events', query_count: '3120', user_count: '6', last_queried_at: '2026-10-16 23:10:02 UTC', est_cost_of_queries_usd: '214.3' },
+      { table_name: 'acme-prod.analytics.orders', query_count: '19210', user_count: '4', last_queried_at: '2026-10-16 23:59:40 UTC', est_cost_of_queries_usd: '138.2' },
+      { table_name: 'acme-prod.erp.stock_levels', query_count: '8640', user_count: '1', last_queried_at: '2026-10-16 23:55:00 UTC', est_cost_of_queries_usd: '14.7' },
+      { table_name: 'acme-prod.marts.dim_customers', query_count: '940', user_count: '5', last_queried_at: '2026-10-16 18:21:12 UTC', est_cost_of_queries_usd: '6.1' },
+    ],
+    '04': [
+      { table_name: 'acme-prod.raw.events_backup_2025', total_rows: '912000000', size_gib: '1840.2', est_storage_cost_usd_per_month: '18.40', created_at: '2025-01-14 09:12:00 UTC' },
+      { table_name: 'acme-prod.sandbox.anna_test_join', total_rows: '41200000', size_gib: '310.5', est_storage_cost_usd_per_month: '6.21', created_at: '2026-03-02 14:40:00 UTC' },
+      { table_name: 'acme-prod.marts.fct_sessions_old', total_rows: '22000000', size_gib: '96.0', est_storage_cost_usd_per_month: '0.96', created_at: '2025-11-20 08:00:00 UTC' },
+      { table_name: 'acme-prod.snapshots.customers_snapshot', total_rows: '5400000', size_gib: '12.4', est_storage_cost_usd_per_month: '0.12', created_at: '2025-06-03 07:00:00 UTC', label: 'snapshot' },
+    ],
+  };
+  show_message('Showing sample data for a made-up company. Drop your own cost report file to replace it.');
+  render();
+};
+
+// ---------- sql script: settings, show it and copy it ----------
+const base_sql = document.getElementById('cost-report-sql').textContent.trim() + '\n';
+// the two lines in the script that the region and projects fields replace
+const region_line = "-- set @@location = 'EU';";
+const projects_line = 'declare projects array<string> default [@@project_id];';
+const region_input = document.getElementById('set-region');
+const projects_input = document.getElementById('set-projects');
+
+// read the fields: region like EU or europe-west1 ("region-eu" also accepted),
+// projects as a comma separated list of project ids
+function read_settings() {
+  const region = region_input.value.trim().replace(/^region-/i, '');
+  const projects = projects_input.value.split(/[,;\n]+/).map(p => p.trim().replace(/['"`]/g, '')).filter(Boolean);
+  const errors = [];
+  if (region && !/^[a-z0-9-]+$/i.test(region)) errors.push('Region can only contain letters, numbers and dashes, for example EU or europe-west1.');
+  // project ids: lower case letters, numbers, dashes; older ones can have a domain prefix (example.com:project)
+  const bad = projects.filter(p => !/^[a-z0-9.:-]+$/.test(p));
+  if (bad.length) errors.push(`Not a valid project id: ${bad.join(', ')}. Use the id, not the display name (lower case, no spaces).`);
+  return { region, projects, errors };
+}
+
+// the script with the field values written in; empty fields keep the automatic lines
+function build_sql() {
+  const s = read_settings();
+  let sql = base_sql;
+  if (!s.errors.length) {
+    if (s.region) sql = sql.replace(region_line, `set @@location = '${s.region}';`);
+    if (s.projects.length) sql = sql.replace(projects_line, `declare projects array<string> default [${s.projects.map(p => `'${p}'`).join(', ')}];`);
+  }
+  return { sql, settings: s };
+}
+
+// refresh the script view and the status line after every change
+function update_sql_view() {
+  const { sql, settings } = build_sql();
+  document.getElementById('sql-view').textContent = sql;
+  const status = document.getElementById('settings-status');
+  if (settings.errors.length) {
+    status.textContent = settings.errors.join(' ');
+    status.classList.add('error');
+  } else {
+    status.classList.remove('error');
+    const region = settings.region ? `region ${settings.region}` : 'your default region';
+    const projects = settings.projects.length ? settings.projects.join(', ') : 'the project you run it in';
+    status.textContent = `The script will read ${region}, in ${projects}.`;
+  }
+  // remember the fields in this browser for next time
+  try { localStorage.setItem('script_settings', JSON.stringify({ region: region_input.value, projects: projects_input.value })); } catch (e) { /* not critical */ }
+}
+
+try {
+  const saved = JSON.parse(localStorage.getItem('script_settings') || '{}');
+  region_input.value = saved.region || '';
+  projects_input.value = saved.projects || '';
+} catch (e) { /* storage blocked, start empty */ }
+region_input.addEventListener('input', update_sql_view);
+projects_input.addEventListener('input', update_sql_view);
+update_sql_view();
+
+document.getElementById('copy-sql').onclick = async () => {
+  const status = document.getElementById('copy-status');
+  const { sql, settings } = build_sql();
+  // don't copy a script with invalid settings, the message under the fields says why
+  if (settings.errors.length) {
+    status.textContent = 'Fix the settings above first.';
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(sql);
+  } catch (e) {
+    // older browsers or blocked clipboard: copy through a hidden text area instead
+    const area = document.createElement('textarea');
+    area.value = sql;
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand('copy');
+    area.remove();
+  }
+  status.textContent = 'Copied. Paste it into a new query tab in BigQuery.';
+  setTimeout(() => { status.textContent = ''; }, 5000);
+};
+
+// restore the collapsed state of sections that are part of the page itself (how it works)
+document.querySelectorAll('.card[data-key]').forEach(sec => {
+  if (!collapsed.has(sec.dataset.key)) return;
+  sec.classList.add('collapsed');
+  const btn = sec.querySelector('.toggle');
+  btn.setAttribute('aria-expanded', 'false');
+  btn.title = 'Expand';
+});
+
+render();
+</script>
+</body>
+</html>

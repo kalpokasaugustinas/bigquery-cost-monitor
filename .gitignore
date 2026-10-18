@@ -1,0 +1,10 @@
+# credentials and keys must never be committed
+*.json
+.env
+
+# script results can hold real usage data, keep them out of the repo
+*.csv
+
+# local and editor files
+.vscode/
+*.log
